@@ -83,23 +83,39 @@ export class GcReplatformWebAppStack extends cdk.Stack {
       description: 'Security group for RDS PostgreSQL',
     });
 
+
+    //allowAllOutbound：新規の外向き通信の許可/不許可。
+    //SGのステートフル：許可された新規の通信に対する「戻り」は自動で許可。
+    //外部→ALB：（ALB Ingress 80/443）
+    //ALB→APP：APP Ingressは必須。 ALB EgressはallowAllOutbound:falseなら必須。trueなら省略可。
+    //SGはステートフルなので、👆️がfalseでもinbound通信の戻りの外向き通信だけは許可される。
+    //allowAllOutboundがtrueならegress 0.0.0.0/0 全ポート許可みたいなもの。IPv6は別。
     albSg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(80), 'Allow HTTP from internet for learning');
-    //ev2モジュール > SGのメソッド。
+    //ev2モジュール > SGのメソッド。ALB用のSGの通信ルール（SG）。Ingress：入る側のルール
+    //Peer：通信相手（どこからどこへ、今回はIngressだから通信元）
+    //⭐️インターネットの任意のIPv4から、80番ポート（http）への通信のみ、ALB SGへのアクセスを許可
+    //今回は外部からの通信を受けるときに「どこから」の通信相手の記述としてPeer。
+    //上のallowAllOutbound: false,で外向きの通信は全拒否。
     albSg.addEgressRule(appSg, ec2.Port.tcp(8080), 'Allow traffic from ALB to app instances');
-
+    //同じくALB用のSGルール、Egress（出ていく）ルール。
+    //出ていく場合、ポート8080のTCP通信のみ可能。宛先はappSGに向く。
+    //許可したトラフィックをALBからappインスタンスへ通す。
     appSg.addIngressRule(albSg, ec2.Port.tcp(8080), 'Allow ALB to app');
+    //APPSGのingress（内向け）ルール。albsgから、TCP通信/ポート8080のみ受け入れる。ALBからappに。
     appSg.addEgressRule(dbSg, ec2.Port.tcp(5432), 'Allow app to PostgreSQL');
-    appSg.addEgressRule(
-      ec2.Peer.anyIpv4(),
-      ec2.Port.tcp(443),
-      'Allow HTTPS outbound for package/API access via NAT',
-    );
-
+    //APPSGのegress（外向け）ルール。appsgから出る場合、宛先はdbsg、TCP通信/ポート5432のみ可能。
+    appSg.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443), 'Allow HTTPS outbound for package/API access via NAT',);
+    //APPSGの（外向け）ルールその2。TCP通信ポート443（https）で、いずれのIPもappsgから出ていくことができる。
+    //👉️もちろんNATGWとルートテーブルは必要。
     dbSg.addIngressRule(appSg, ec2.Port.tcp(5432), 'Allow app instance to DB');
+    //dbsgのingress（内向け）ルール、egressは不要のため（isolated）無い。appsgからのTCP通信/ポート5432だけ受け入れる。
+    //ステートフル（SGの仕様）で戻り通信は返すことができる。インターネットへの設計がないのがisolated。
 
     const dbSecret = new secretsmanager.Secret(this, 'DbSecret', {
-      secretName: 'gc/replatform/app/db-master',
-      encryptionKey: appKey,
+      //シクマネのシークレット（秘密情報）そのもののConstruct。secret managerライブラリのSecretコンストラクト。L2。
+      //必須props無し。
+      secretName: 'gc/replatform/app/db-master',//aliasのようなもの、一意の名前。
+      encryptionKey: appKey,//何を使って暗号化するか。上で作成したKMSのキー、appkey。
       generateSecretString: {
         secretStringTemplate: JSON.stringify({ username: 'appadmin' }),
         generateStringKey: 'password',
